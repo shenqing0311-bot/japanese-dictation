@@ -31,6 +31,7 @@ textarea{width:100%;min-height:120px;border:1px solid #c9d0d9;border-radius:10px
 <select id="catFilter"><option value="ALL">全部分类</option></select>
 <select id="modeFilter"><option value="normal">正常练习</option><option value="wrong">只练错题</option></select>
 <select id="rate"><option value=".75">0.75×</option><option value=".9">0.9×</option><option value="1" selected>1.0×</option><option value="1.1">1.1×</option><option value="1.2">1.2×</option></select>
+<select id="voice" aria-label="发音人"><option value="">自动选择发音人</option></select>
 <button id="shuffleBtn">随机顺序</button>
 <button id="wrongBtn">查看错题本</button>
 </div>
@@ -39,7 +40,7 @@ textarea{width:100%;min-height:120px;border:1px solid #c9d0d9;border-radius:10px
 
 <div class="panel">
 <div class="badges"><span class="badge" id="num"></span><span class="badge" id="lvl"></span><span class="badge" id="cat"></span><span class="badge" id="grammar"></span></div>
-<div class="audio"><button class="primary" id="playBtn">▶︎ 播放</button><button id="replayBtn">↻ 再听一次</button></div>
+<div class="audio"><button class="primary" id="playBtn">▶︎ 播放</button><button id="replayBtn">↻ 再听一次</button><span class="note" id="audioStatus" role="status" aria-live="polite">准备就绪</span></div>
 <textarea id="input" lang="ja" placeholder="ここに聞こえた日本語を入力してください…"></textarea>
 <div class="controls" style="margin-top:11px">
 <button class="primary" id="checkBtn">检查答案</button>
@@ -79,6 +80,9 @@ var custom = [];
 var pool = [];
 var current = 0;
 var shuffled = false;
+var japaneseVoices = [];
+var speakToken = 0;
+var currentUtterance = null;
 var state = loadState();
 
 function $(id){ return document.getElementById(id); }
@@ -155,14 +159,50 @@ function render(){
 function updateStats(){
   $("stats").innerHTML="已答 "+state.attempts+" 次<br>完全正确 "+state.exact+" 次 · "+(state.attempts?Math.round(state.exact/state.attempts*100):0)+"%";
 }
+function setAudioStatus(text,isError){
+  var s=$("audioStatus");s.textContent=text;s.style.color=isError?"var(--bad)":"var(--muted)";
+}
+function voiceScore(v){
+  var name=(v.name||"").toLowerCase(),score=0;
+  if(v.localService)score+=20;if(v.default)score+=5;
+  if(/kyoko|otoya|hattori|haruka|sayaka|nanami/.test(name))score+=50;
+  if(/google.*日本語|google.*japanese/.test(name))score+=10;
+  return score;
+}
+function loadVoices(){
+  if(!("speechSynthesis" in window))return;
+  japaneseVoices=speechSynthesis.getVoices().filter(function(v){return (v.lang||"").toLowerCase().indexOf("ja")===0;});
+  japaneseVoices.sort(function(a,b){return voiceScore(b)-voiceScore(a);});
+  var sel=$("voice"),saved=localStorage.getItem("jpDictVoice")||"",html='<option value="">自动选择发音人</option>';
+  japaneseVoices.forEach(function(v){html+='<option value="'+escapeHtml(v.name)+'">'+escapeHtml(v.name)+'（'+escapeHtml(v.lang)+'）</option>';});
+  sel.innerHTML=html;
+  if(saved&&japaneseVoices.some(function(v){return v.name===saved;}))sel.value=saved;
+  setAudioStatus(japaneseVoices.length?"已加载 "+japaneseVoices.length+" 个日语发音人":"等待日语发音人…",false);
+}
+function selectedVoice(){
+  var name=$("voice").value;
+  return japaneseVoices.find(function(v){return v.name===name;})||japaneseVoices[0]||null;
+}
 function speak(){
   if(!pool.length)return;
-  if(!("speechSynthesis" in window)){alert("浏览器不支持语音朗读，请用 Safari 或 Chrome。");return;}
-  speechSynthesis.cancel();
-  var u=new SpeechSynthesisUtterance(pool[current].text);u.lang="ja-JP";u.rate=parseFloat($("rate").value);
-  var vs=speechSynthesis.getVoices().filter(function(v){return (v.lang||"").toLowerCase().indexOf("ja")===0;});
-  if(vs.length)u.voice=vs[0];
-  speechSynthesis.speak(u);
+  if(!("speechSynthesis" in window)||!("SpeechSynthesisUtterance" in window)){setAudioStatus("当前浏览器不支持语音朗读",true);return;}
+  var token=++speakToken,started=false;
+  speechSynthesis.cancel();speechSynthesis.resume();loadVoices();setAudioStatus("正在准备播放…",false);
+  setTimeout(function(){
+    if(token!==speakToken)return;
+    var u=new SpeechSynthesisUtterance(pool[current].text);currentUtterance=u;u.lang="ja-JP";u.rate=parseFloat($("rate").value);u.pitch=1;
+    var voice=selectedVoice();if(voice)u.voice=voice;
+    u.onstart=function(){started=true;setAudioStatus("正在播放"+(voice?" · "+voice.name:""),false);};
+    u.onend=function(){if(token===speakToken){setAudioStatus("播放完成",false);currentUtterance=null;}};
+    u.onerror=function(e){if(e.error!=="canceled"&&token===speakToken){setAudioStatus("播放失败："+(e.error||"请刷新后重试"),true);currentUtterance=null;}};
+    speechSynthesis.speak(u);
+    setTimeout(function(){if(token===speakToken&&!started&&speechSynthesis.paused)speechSynthesis.resume();},300);
+    setTimeout(function(){
+      if(token!==speakToken||started)return;
+      if(speechSynthesis.speaking){started=true;setAudioStatus("正在播放"+(voice?" · "+voice.name:""),false);}
+      else setAudioStatus("语音未能启动，请选择发音人后重试",true);
+    },2500);
+  },80);
 }
 function showDetails(q, headline, cls, mine, score, withDiff){
   var f=$("feedback"); f.style.display="block";
@@ -233,10 +273,13 @@ function exportWrong(){
 }
 $("playBtn").onclick=speak;$("replayBtn").onclick=speak;$("checkBtn").onclick=check;$("showBtn").onclick=showAnswer;$("hintBtn").onclick=hint;$("nextBtn").onclick=next;
 $("levelFilter").onchange=rebuildPool;$("catFilter").onchange=rebuildPool;$("modeFilter").onchange=rebuildPool;
+$("voice").onchange=function(){localStorage.setItem("jpDictVoice",this.value);setAudioStatus(this.value?"已选择："+this.value:"自动选择发音人",false);};
 $("shuffleBtn").onclick=function(){shuffled=!shuffled;rebuildPool();};
 $("wrongBtn").onclick=function(){$("wrongPanel").classList.toggle("hidden");renderWrong();};
 $("importBtn").onclick=importCorpus;$("exportWrongBtn").onclick=exportWrong;
 $("resetBtn").onclick=function(){if(confirm("确定清空所有学习记录和错题吗？")){state={attempts:0,exact:0,items:{}};saveState();updateStats();renderWrong();}};
 $("input").addEventListener("keydown",function(e){if((e.metaKey||e.ctrlKey)&&e.key==="Enter")check();});
+if("speechSynthesis" in window){loadVoices();speechSynthesis.addEventListener("voiceschanged",loadVoices);setTimeout(loadVoices,500);}
+else setAudioStatus("当前浏览器不支持语音朗读",true);
 fillCats();rebuildPool();
 </script></body></html>
